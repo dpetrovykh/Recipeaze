@@ -1,0 +1,394 @@
+Great question. This is where the architecture turns into **actual code you can write**.
+
+Below is a **broad but concrete map** of the code you’ll need, organized by *what problem each chunk solves*, not by language or framework. I’ll assume something like Python + SQL, but the structure applies to any stack.
+
+---
+
+# Big picture: what your code does
+
+You are building **a data pipeline plus an app**.
+
+The pipeline does three things:
+
+1. **Load raw USDA data** (Layer 1)
+2. **Interpret it into app-friendly foods** (Layer 2)
+3. **Serve and modify it in real life** (Layer 3)
+
+Your code should mirror that.
+
+---
+
+# High-level folder layout
+
+```
+food-data/
+├── usda/
+│   ├── csv/                  ← raw USDA downloads
+│   ├── schema.sql            ← Layer 1 tables
+│   └── load_usda.py          ← CSV → Layer 1
+│
+├── nutrition/
+│   ├── schema.sql            ← Layer 2 tables
+│   ├── mappings/
+│   │   └── canonical_foods.yaml
+│   ├── build_foods.py        ← Layer 2 jobs
+│   └── build_recipes.py
+│
+├── app_data/
+│   ├── schema.sql            ← Layer 3 tables
+│   └── api/                  ← app logic
+│
+├── db/
+│   ├── migrations/
+│   └── roles.sql
+│
+└── scripts/
+    └── rebuild_all.sh
+```
+
+Now let’s walk through **what each chunk actually does**.
+
+---
+
+# 1️⃣ USDA ingestion code (Layer 1)
+
+### Purpose
+
+> “Take CSVs exactly as published and store them safely.”
+
+### Inputs
+
+* Folder of USDA CSVs
+
+### Outputs
+
+* Populated `usda_raw.*` tables
+
+---
+
+### Code responsibilities
+
+**`schema.sql`**
+
+* Creates normalized USDA tables
+* Mirrors USDA structure closely
+
+**`load_usda.py`**
+
+* Reads CSVs
+* Validates types
+* Inserts rows
+* Never updates or deletes
+
+Example responsibilities:
+
+```text
+- Read FOOD.csv
+- Map columns → usda_raw.food
+- Read FOOD_NUTRIENT.csv
+- Insert millions of rows efficiently
+```
+
+Important:
+
+* No business logic
+* No collapsing
+* No filtering beyond sanity checks
+
+Think: **ETL loader, not interpreter**.
+
+---
+
+# 2️⃣ Canonical food mapping (Layer 2 — part 1)
+
+### Purpose
+
+> “Decide what foods exist in my app.”
+
+This is where *“egg”* becomes a thing.
+
+---
+
+### Inputs
+
+* `usda_raw.food`
+
+### Outputs
+
+* `nutrition.food`
+
+---
+
+### Code responsibilities
+
+**`canonical_foods.yaml` (or JSON)**
+
+```yaml
+egg_whole:
+  usda_food_id: 171705
+  name: "Egg (whole)"
+```
+
+This file:
+
+* Is hand-curated
+* Encodes your opinions
+* Is version-controlled
+
+---
+
+**`build_foods.py`**
+
+* Reads the mapping file
+* Inserts rows into `nutrition.food`
+* Ensures stable IDs
+
+Responsibilities:
+
+```text
+- Validate USDA IDs exist
+- Prevent duplicates
+- Fail loudly if mapping breaks
+```
+
+This is **product definition**, not data cleaning.
+
+---
+
+# 3️⃣ Nutrition aggregation (Layer 2 — part 2)
+
+### Purpose
+
+> “Turn USDA nutrients into app-friendly numbers.”
+
+---
+
+### Inputs
+
+* `usda_raw.food_nutrient`
+* `nutrition.food`
+
+### Outputs
+
+* `nutrition.food_macros`
+* `nutrition.food_micros`
+
+---
+
+### Code responsibilities
+
+**`build_food_macros.py`**
+
+* Select canonical USDA row
+* Extract needed nutrients
+* Normalize units
+* Insert denormalized rows
+
+Example logic:
+
+```text
+For each nutrition.food:
+  - Find its canonical USDA food
+  - Pull protein, fat, carbs, kcal
+  - Store one row per food
+```
+
+Important:
+
+* Deterministic
+* Idempotent
+* Rebuildable
+
+No user logic here.
+
+---
+
+# 4️⃣ Search & UX helpers (Layer 2 — part 3)
+
+### Purpose
+
+> “Make foods searchable and usable.”
+
+---
+
+### Inputs
+
+* `nutrition.food`
+
+### Outputs
+
+* `nutrition.food_search`
+* Maybe `nutrition.food_alias`
+
+---
+
+### Code responsibilities
+
+**`build_food_search.py`**
+
+* Generate aliases
+* Normalize casing
+* Weight results
+
+This is still Layer 2:
+
+* Derived
+* Replaceable
+* App-facing
+
+---
+
+# 5️⃣ Recipe computation (Layer 2 — optional)
+
+### Purpose
+
+> “Compute nutrition from ingredients.”
+
+---
+
+### Inputs
+
+* `nutrition.food_macros`
+* Recipe definitions
+
+### Outputs
+
+* `nutrition.recipe_nutrition`
+
+Responsibilities:
+
+```text
+- Sum ingredient nutrients
+- Normalize per serving
+```
+
+Still rebuildable. Still no prices or overrides.
+
+---
+
+# 6️⃣ App-owned data (Layer 3)
+
+### Purpose
+
+> “Handle reality.”
+
+---
+
+### Inputs
+
+* User input
+* Store data
+* Barcode scans
+
+### Outputs
+
+* `app.custom_food`
+* `app.food_package`
+* `app.food_price`
+* `app.nutrition_override`
+
+---
+
+### Code responsibilities
+
+This lives in your **API layer**, not batch jobs.
+
+Example:
+
+```text
+POST /foods
+POST /packages
+POST /overrides
+```
+
+Rules:
+
+* Can mutate
+* Must reference Layer 2
+* Must not touch Layer 1 or 2 tables
+
+---
+
+# 7️⃣ Query-time composition logic
+
+### Purpose
+
+> “Combine all layers into one answer.”
+
+This is **application code**, not ETL.
+
+Responsibilities:
+
+```text
+- Fetch base nutrition
+- Apply override if exists
+- Apply package grams
+- Attach price if needed
+```
+
+This is where the layers *stack*.
+
+---
+
+# 8️⃣ Rebuild & orchestration
+
+### Purpose
+
+> “Make everything repeatable.”
+
+---
+
+### Code responsibilities
+
+**`rebuild_all.sh`**
+
+```bash
+load_usda.py
+build_foods.py
+build_food_macros.py
+build_food_search.py
+```
+
+Properties:
+
+* Safe to rerun
+* Order-dependent
+* Automatable
+
+---
+
+# Where the “boiling down” happens
+
+| Action                | Layer | Code                 |
+| --------------------- | ----- | -------------------- |
+| Import CSV            | L1    | load_usda.py         |
+| Collapse egg variants | L2    | canonical_foods.yaml |
+| Compute macros        | L2    | build_food_macros.py |
+| Apply carton calories | L3    | API logic            |
+
+---
+
+# Mental model for your codebase
+
+Each chunk answers **one question**:
+
+| Code chunk | Question                    |
+| ---------- | --------------------------- |
+| Loader     | What did USDA publish?      |
+| Mappings   | What foods exist in my app? |
+| Builders   | What are their nutrients?   |
+| API        | How do users interact?      |
+| Queries    | What’s the final truth?     |
+
+If a file tries to answer more than one question → it’s doing too much.
+
+---
+
+If you want next, I can:
+
+* Sketch **actual Python pseudocode**
+* Show **SQL for one build step**
+* Help choose **tools** (pandas vs pure SQL)
+* Help design **canonical-food rules**
+
+Just tell me your preferred stack or next focus.
