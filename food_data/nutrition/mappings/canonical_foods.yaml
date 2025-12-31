@@ -1,0 +1,6 @@
+egg_whole:
+  usda_food_id: 748967
+  name: "Egg (whole)"
+milk_whole:
+  usda_food_id: 746782
+  name: "Milk (whole)"
